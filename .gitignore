@@ -9,8 +9,6 @@ node_modules/
 # Downloads folder (can contain large files)
 downloads/
 
-# Files folder (contains payload files)
-files/
 
 # Logs
 logs/
