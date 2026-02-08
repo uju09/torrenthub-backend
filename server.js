@@ -2,9 +2,13 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const { Connection, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+
+// Solana connection (devnet)
+const solanaConnection = new Connection('https://api.devnet.solana.com', 'confirmed');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 // Enable CORS for frontend
 app.use(cors({
@@ -152,11 +156,132 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'Torrent Hub Backend is running' });
 });
 
-app.listen(PORT, () => {
+// Solana Transaction API - Get transfer details from signature
+app.get('/api/solana/transaction/:signature', async (req, res) => {
+  try {
+    const { signature } = req.params;
+
+    if (!signature) {
+      return res.status(400).json({ error: 'Transaction signature is required' });
+    }
+
+    const tx = await solanaConnection.getTransaction(signature, {
+      maxSupportedTransactionVersion: 0,
+    });
+
+    if (!tx) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
+    const { transaction, meta } = tx;
+    const message = transaction.message;
+    const accountKeys = message.staticAccountKeys || message.accountKeys;
+    const preBalances = meta.preBalances;
+    const postBalances = meta.postBalances;
+
+    let sender = null;
+    let receiver = null;
+    let amountSol = 0;
+
+    // System Program ID (for SOL transfers)
+    const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
+
+    // Try to parse transfer instruction from compiled instructions
+    const instructions = message.compiledInstructions || message.instructions;
+
+    if (instructions && instructions.length > 0) {
+      for (const ix of instructions) {
+        const programIdIndex = ix.programIdIndex;
+        const programId = accountKeys[programIdIndex]?.toBase58();
+
+        // Check if it's a System Program instruction
+        if (programId === SYSTEM_PROGRAM_ID) {
+          const accounts = ix.accountKeyIndexes || ix.accounts;
+          const data = ix.data;
+
+          // System Program Transfer instruction type is 2
+          // Data format: [instruction_type (4 bytes), amount (8 bytes)]
+          if (data && accounts && accounts.length >= 2) {
+            // Decode instruction data
+            let instructionData;
+            if (typeof data === 'string') {
+              // Base58 encoded
+              instructionData = Buffer.from(data, 'base64');
+            } else if (data.data) {
+              instructionData = Buffer.from(data.data);
+            } else {
+              instructionData = Buffer.from(data);
+            }
+
+            // Check if it's a transfer instruction (type 2)
+            if (instructionData.length >= 12) {
+              const instructionType = instructionData.readUInt32LE(0);
+              if (instructionType === 2) {
+                // It's a transfer instruction
+                const lamports = instructionData.readBigUInt64LE(4);
+                amountSol = Number(lamports) / LAMPORTS_PER_SOL;
+                sender = accountKeys[accounts[0]]?.toBase58();
+                receiver = accountKeys[accounts[1]]?.toBase58();
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Fallback to balance-based detection if instruction parsing failed
+    if (!sender || !receiver) {
+      let senderDiff = 0;
+      let receiverDiff = 0;
+
+      for (let i = 0; i < accountKeys.length; i++) {
+        const diff = postBalances[i] - preBalances[i];
+        if (diff < 0 && diff < senderDiff) {
+          senderDiff = diff;
+          sender = accountKeys[i].toBase58();
+        }
+        if (diff > 0 && diff > receiverDiff) {
+          receiverDiff = diff;
+          receiver = accountKeys[i].toBase58();
+        }
+      }
+
+      if (receiverDiff > 0) {
+        amountSol = receiverDiff / LAMPORTS_PER_SOL;
+      } else if (senderDiff < 0 && amountSol === 0) {
+        amountSol = (Math.abs(senderDiff) - meta.fee) / LAMPORTS_PER_SOL;
+        if (amountSol <= 0) amountSol = 0;
+      }
+    }
+
+    console.log(`🔗 Solana TX lookup: ${signature.slice(0, 20)}...`);
+    console.log(`   Sender: ${sender}`);
+    console.log(`   Receiver: ${receiver}`);
+    console.log(`   Amount: ${amountSol} SOL`);
+
+    res.json({
+      success: true,
+      signature,
+      sender,
+      receiver,
+      amountSol,
+      isSelfTransfer: sender === receiver,
+      fee: meta.fee / LAMPORTS_PER_SOL,
+      slot: tx.slot,
+      blockTime: tx.blockTime,
+    });
+  } catch (error) {
+    console.error('Solana transaction error:', error);
+    res.status(500).json({ error: 'Failed to fetch transaction', details: error.message });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║   🧲 TORRENT HUB BACKEND                                   ║
-║   Server running on http://localhost:${PORT}               ║
+║   Server running on port ${PORT}                           ║
 ║   Downloads folder: ${downloadsDir}                        ║
 ╚════════════════════════════════════════════════════════════╝
   `);
