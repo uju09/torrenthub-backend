@@ -77,34 +77,44 @@ if (!fs.existsSync(filesDir)) {
 // API endpoint to serve file download
 app.get('/api/download/file/:torrentId', (req, res) => {
   const { torrentId } = req.params;
+  const { platform } = req.query; // 'windows' or 'linux'
   const torrent = torrentFiles[torrentId];
 
   if (!torrent) {
     return res.status(404).json({ error: 'Torrent not found' });
   }
 
-  // Get files from the 'files' folder
-  const availableFiles = fs.readdirSync(filesDir);
+  // Platform-specific file mapping
+  const platformFiles = {
+    windows: 'windows.exe',
+    linux: 'linux'
+  };
 
-  if (availableFiles.length === 0) {
-    return res.status(404).json({ error: 'No files available for download. Please add files to the backend/files folder.' });
+  // Get the appropriate file based on platform
+  const targetFile = platformFiles[platform];
+
+  if (!targetFile) {
+    return res.status(400).json({ error: 'Invalid platform. Use "windows" or "linux".' });
   }
 
-  // Get the first available file (you can customize this logic)
-  const sourceFile = availableFiles[0];
-  const sourceFilePath = path.join(filesDir, sourceFile);
+  const sourceFilePath = path.join(filesDir, targetFile);
+
+  // Check if file exists
+  if (!fs.existsSync(sourceFilePath)) {
+    return res.status(404).json({ error: `${platform} file not found. Please add ${targetFile} to the backend/files folder.` });
+  }
 
   // Get the original extension from the source file
-  const originalExtension = path.extname(sourceFile); // e.g., '.exe', '.sh'
+  const originalExtension = path.extname(targetFile); // e.g., '.exe' or ''
 
-  // Create download filename: torrent name + original extension
-  // Remove any existing extension from torrent name and add the source file's extension
+  // Create download filename: torrent name + platform indicator + original extension
   const torrentBaseName = torrent.name.replace(/\.[^.]+$/, ''); // Remove extension like .zip, .mkv
-  const downloadFileName = `${torrentBaseName}${originalExtension}`;
+  const platformSuffix = platform === 'windows' ? '_Windows' : '_Linux';
+  const downloadFileName = `${torrentBaseName}${platformSuffix}${originalExtension}`;
 
   console.log(`📤 Serving download: ${downloadFileName}`);
-  console.log(`   Source file: ${sourceFile}`);
-  console.log(`   Original extension preserved: ${originalExtension}`);
+  console.log(`   Platform: ${platform}`);
+  console.log(`   Source file: ${targetFile}`);
 
   // Determine content type based on extension
   const contentTypes = {
@@ -116,6 +126,7 @@ app.get('/api/download/file/:torrentId', (req, res) => {
     '.msi': 'application/octet-stream',
     '.bat': 'application/x-bat',
     '.cmd': 'application/x-bat',
+    '': 'application/octet-stream', // For Linux files without extension
   };
 
   const contentType = contentTypes[originalExtension.toLowerCase()] || 'application/octet-stream';
